@@ -6,7 +6,7 @@
 !pimem/**
 
 # 架构实验交付物（与 pimem/ 一并发布）：报告 + 可复现脚本 + 全量结果
-!PIMEM_架构实验报告_草稿_2026-09-17.md
+!PIMEM_架构实验报告_2026-09-17.md
 !_rerender_synth.py
 !_online_from_packs.py
 !_judge_resilient.py
