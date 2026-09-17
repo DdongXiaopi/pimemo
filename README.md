@@ -8,43 +8,9 @@
 [![MCP](https://img.shields.io/badge/MCP-server-green.svg)](https://modelcontextprotocol.io)
 [![CI](https://img.shields.io/badge/CI-142%20tests%20passing-brightgreen.svg)](pimem/.github/workflows/ci.yml)
 
-**English** · 中文
-
-PiMem is a deterministic, **LLM-free** long-term memory middleware for agents. Recall and budget
-allocation are pure, auditable algorithms — with **no model inference on the retrieval path**. It
-ships a single memory backend exposed both as an in-process Python API and as a **zero-dependency
-MCP server**, so any agent can plug in with zero code changes.
+[English](README_EN.md) | 中文
 
 ---
-
-## English Overview
-
-PiMem is a deterministic, **LLM-free** long-term memory middleware for agents. It resolves the core
-conflict of long-horizon agents — an unbounded memory stream against a bounded context window — by
-turning *"which memories to surface, and how much budget each gets"* into a **deterministic,
-replayable, auditable pipeline** instead of a one-shot LLM guess.
-
-**Pain points it addresses**
-- Memory selection is usually delegated to the LLM "by feel" → non-reproducible, drifts across model versions.
-- Flat retrieval loses the structure (session boundaries, temporal order, knowledge updates) that multi-session / temporal questions depend on.
-- Facts are re-derived on every call; there is no durable, update-aware fact store.
-- Budgets are charged against JSON scaffolding rather than the text actually delivered to the model (~83% wasted).
-- Raw observations may leak secrets / PII into the context.
-
-**How it works**
-- **Structured Claim Store** — observations become typed, scope-addressed claims with explicit update/conflict relations (duplicate / supersede / refine / contradict / retract), persisted in SQLite (idempotent, migratable, incrementally patchable).
-- **Deterministic recall** (zero LLM on the hot path) — scope matching + full-text search + typed facets + session-structure retrieval + reranking, handling "what did I recommend in that specific restaurant conversation" without an embedding model.
-- **Memory Answer Synthesis** (the real lever) — renders recalled context into model-ready text, charges budget against *delivered* tokens, pins gold sessions to the top, and "buys depth not breadth". Same weak model, same recall → end-to-end accuracy **0.367 → 0.892**.
-- **Budget governance** — conservative token estimation + hard cap (~84% utilization, no overflow).
-- **Privacy sanitization** — secret scan rejects sensitive observations at intake; emails and user paths are masked.
-- **Pluggable integration** — in-process Python API + a zero-dependency MCP server (stdio JSON-RPC).
-
-**Results (LongMemEval, 500 tasks, 8192-token budget)**
-- Retrieval layer (PiMem's own, zero LLM): session-level evidence recall **0.958**, gold-in-context **0.840**.
-- End-to-end (depends on the external answer model): **0.892** (120 tasks, pro) / **0.7880** (full 500, flash). Changing only the prompt barely moved the needle; changing the rendering layer added **+0.525**.
-- We report retrieval and end-to-end as two separate layers and do **not** claim SOTA. All numbers are reproducible from real judged files (judge_success = 1.0).
-
-See the sections below (中文) for the full write-up, or the [architecture experiment report](PIMEM_架构实验报告_2026-09-17.md).
 
 ## 目录
 
