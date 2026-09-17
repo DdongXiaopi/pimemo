@@ -1,0 +1,70 @@
+*** Begin Patch
+*** Update File: pimem/src/pimem/retrieval/compiler.py
+@@
+         slots = block_slots(block)
+         support_items = candidates_by_session.get(str(bundle.get("session_id") or ""), block)
++        historical_signal = max(
++            int(
++                plan.speech_act_target == "historical_answer"
++                and item.get("role") == "user"
++                and item.get("speech_act") == "user_statement"
++                and item.get("pair_type") == "user_historical_statement"
++            )
++            for item in block
++        )
++        speech_match = max(
++            int(item.get("speech_act_match") or 0)
++            for item in block
++        )
+         quality = (
+             int(bool((bundle.get("coverage") or {}).get("primary_answer"))),
+             len(slots),
++            historical_signal,
++            speech_match,
+             session_contract_rank(support_items, plan, set(block_ids)),
+             max((int(item.get("question_overlap") or 0) for item in support_items), default=0),
+             max((int(item.get("question_entity_hits") or 0) for item in support_items), default=0),
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+     def test_hard_admission_does_not_trade_answer_closure_for_shorter_distractor(self):
+@@
+         selected = _select_hard_answer_closure(
+             [distractor, target], plan, bundles, token_budget=4096
+         )
+         self.assertEqual([item["record_id"] for item in selected], ["candidate:target"])
++
++    def test_hard_admission_prefers_historical_answer_pair_over_same_shaped_turn(self):
++        plan = build_query_plan(
++            "What show did I mention on Netflix that only had the last season available?"
++        )
++        target = {
++            "record_type": "answer_candidate", "record_id": "candidate:target",
++            "session_id": "target", "answer_shape": "entity", "score": 100,
++            "role": "user", "speech_act": "user_statement",
++            "pair_type": "user_historical_statement",
++            "answer_units": [{"kind": "quoted_span", "value": "doc martin"}],
++        }
++        distractor = {
++            "record_type": "answer_candidate", "record_id": "candidate:distractor",
++            "session_id": "distractor", "answer_shape": "entity", "score": 900,
++            "role": "user", "speech_act": "user_statement",
++            "pair_type": "user_without_preceding_question",
++            "answer_units": [{"kind": "quoted_span", "value": "The Crown"}],
++        }
++        bundles = [
++            {
++                "episode_id": "episode:target", "session_id": "target",
++                "primary_answer_candidate_ids": ["candidate:target"],
++                "coverage": {"primary_answer": True},
++            },
++            {
++                "episode_id": "episode:distractor", "session_id": "distractor",
++                "primary_answer_candidate_ids": ["candidate:distractor"],
++                "coverage": {"primary_answer": True},
++            },
++        ]
++        selected = _select_hard_answer_closure(
++            [distractor, target], plan, bundles, token_budget=4096
++        )
++        self.assertEqual([item["record_id"] for item in selected], ["candidate:target"])
+*** End Patch

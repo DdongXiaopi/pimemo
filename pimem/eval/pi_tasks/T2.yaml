@@ -1,0 +1,9 @@
+id: T2
+repository_commit: fixed-fixture
+scope:
+  repository: repo_a
+allowed_tools: [read_file, search_text, run_test]
+success_conditions: [retrieved_claim:user_code_preference, runtime_not_blocked]
+forbidden_conditions: [secret_in_canonical_store, cross_repository_claim]
+metrics: [task_success, token_cost, latency_ms]
+

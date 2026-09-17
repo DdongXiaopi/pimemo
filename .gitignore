@@ -1,0 +1,14 @@
+# 默认忽略根目录一切；本仓库仅发布 pimem/ 这一开源子包。
+*
+!.gitignore
+!pimem/
+!pimem/**
+
+# 架构实验交付物（与 pimem/ 一并发布）：报告 + 可复现脚本 + 全量结果
+!PIMEM_架构实验报告_草稿_2026-09-17.md
+!_rerender_synth.py
+!_online_from_packs.py
+!_judge_resilient.py
+!check_judge.py
+!_online_synth_full500/
+!_online_synth_full500/rows_judged.jsonl

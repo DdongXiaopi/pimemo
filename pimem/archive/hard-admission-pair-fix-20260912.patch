@@ -1,0 +1,66 @@
+*** Begin Patch
+*** Update File: pimem/src/pimem/retrieval/evidence_units.py
+@@
+         previous_questions = [item for item in turns if item.turn_index < turn.turn_index
+                               and _looks_like_question(item.content)]
+         question_turn = max(previous_questions, key=lambda item: item.turn_index, default=None)
++        if turn.role == "assistant":
++            pair_type = "nearest_preceding_user" if question_turn else "assistant_without_preceding_question"
++        elif _looks_like_question(turn.content):
++            pair_type = "missing_source_pair"
++        elif user_answer_requested:
++            pair_type = "user_historical_statement"
++        else:
++            pair_type = "user_without_preceding_question"
+         result.append({"record_type": "answer_candidate", "record_id": _stable_id(episode.episode_id, turn.turn_id),
+@@
+                         "question_turn_id": question_turn.turn_id if question_turn else None,
+                         "question_turn_index": question_turn.turn_index if question_turn else None,
++                        "pair_type": pair_type,
+                         "question_text": question_turn.content if question_turn else None,
+*** Update File: pimem/src/pimem/retrieval/episodic_retriever.py
+@@
+     user_answer_evidence = bool(
+@@
+         or (
+             user_self_reference
+             and int(item.get("answer_discriminative_hits") or 0) > 0
+         )
++        or (
++            pair_type == "user_historical_statement"
++            and any(str(unit.get("kind") or "") in {
++                "quoted_span", "list_item", "typed_sentence", "attribute_sentence",
++                "table_cell", "table_coordinate", "table_row", "numeric_value",
++            } for unit in answer_units)
++        )
+     )
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+ from pimem.retrieval.query_plan import build_query_plan, slot_matches
++from pimem.retrieval.episodes import Episode, Turn
++from pimem.retrieval.evidence_units import answer_candidates
+@@
+     def test_hard_admission_prefers_historical_answer_pair_over_same_shaped_turn(self):
+@@
+         selected = _select_hard_answer_closure(
+             [distractor, target], plan, bundles, token_budget=4096
+         )
+         self.assertEqual([item["record_id"] for item in selected], ["candidate:target"])
++
++    def test_answer_candidates_preserve_historical_user_pair_type(self):
++        plan = build_query_plan(
++            "What show did I mention on Netflix that only had the last season available?"
++        )
++        episode = Episode(
++            episode_id="episode:test", root_session_id="session:test", scope={},
++            turn_ids=["turn:1"], start_turn=0, end_turn=0,
++        )
++        turns = [Turn(
++            turn_id="turn:1", observation_id="obs:1", episode_id="episode:test",
++            turn_index=0, role="user",
++            content='I mentioned an example, "doc martin" only had the last season available.',
++            observed_at="2026-01-01T00:00:00+00:00", source_ref="test",
++        )]
++        candidates = answer_candidates(episode, turns, plan, max_chars=None)
++        self.assertEqual(candidates[0]["pair_type"], "user_historical_statement")
+*** End Patch

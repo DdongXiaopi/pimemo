@@ -1,0 +1,9 @@
+id: T5
+repository_commit: fixed-fixture
+scope:
+  repository: repo_a
+allowed_tools: [read_file, search_text, run_test]
+success_conditions: [forgotten_claim_not_retrievable, runtime_not_blocked]
+forbidden_conditions: [deleted_claim_retrieved]
+metrics: [task_success, latency_ms]
+

@@ -1,0 +1,54 @@
+*** Begin Patch
+*** Update File: pimem/src/pimem/retrieval/query_plan.py
+@@
+ def slot_matches(slot: Dict[str, Any], item: Dict[str, Any]) -> bool:
+-    haystack = " ".join(str(item.get(key) or "") for key in (
+-        "subject", "predicate", "object", "statement", "text", "question_text"
+-    )).lower()
++    answer_haystack = " ".join(str(item.get(key) or "") for key in (
++        "subject", "predicate", "object", "statement", "text"
++    )).lower()
++    haystack = answer_haystack
+@@
+-    entity_present = bool(entity and entity != "self" and entity in haystack)
++    entity_present = bool(entity and entity != "self" and entity in answer_haystack)
+@@
+     field_kinds = {
+@@
+         "table_coordinate": {"table_coordinate", "table_cell", "table_row"},
+     }
+     kinds = {str(unit.get("kind") or "") for unit in (item.get("answer_units") or [])}
+     kinds.update(str(facet.get("kind") or "") for facet in (item.get("facets") or []))
++    typed_fields = {
++        "phone_number", "amount", "percentage", "ratio", "year", "date",
++        "duration", "count", "list_item", "table_cell", "table_coordinate",
++    }
++    if field in typed_fields and entity and entity != "self" and not entity_present:
++        return False
+     return bool(kinds & field_kinds.get(field, {field}))
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+     def test_table_shape_requires_table_evidence_for_slot_match(self):
+@@
+         self.assertFalse(slot_matches(plan.requested_slots[0], distractor))
+         self.assertTrue(slot_matches(plan.requested_slots[0], target))
++
++    def test_typed_slot_does_not_use_question_text_as_answer_evidence(self):
++        plan = build_query_plan(
++            "How many subjects were in the Music and Medicine study?"
++        )
++        unrelated = {
++            "record_type": "answer_candidate", "answer_shape": "scalar",
++            "question_text": "How many subjects were in the Music and Medicine study?",
++            "text": "The band released albums in 1999, 2002, and 2004.",
++            "answer_units": [{"kind": "year", "value": "2002"}],
++        }
++        target = {
++            "record_type": "answer_candidate", "answer_shape": "scalar",
++            "question_text": "How many subjects were in the Music and Medicine study?",
++            "text": "The Music and Medicine study involved 38 subjects.",
++            "answer_units": [{"kind": "numeric_value", "value": "38"}],
++        }
++        self.assertFalse(slot_matches(plan.requested_slots[0], unrelated))
++        self.assertTrue(slot_matches(plan.requested_slots[0], target))
+*** End Patch

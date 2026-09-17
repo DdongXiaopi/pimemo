@@ -1,0 +1,9 @@
+*** Begin Patch
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+     def test_answer_candidates_preserve_historical_user_pair_type(self):
+         plan = build_query_plan(
+-            "What show did I mention on Netflix that only had the last season available?"
++            "I mentioned a show on Netflix that only had the last season available. What was it?"
+         )
+*** End Patch

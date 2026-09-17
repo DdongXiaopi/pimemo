@@ -1,0 +1,26 @@
+*** Begin Patch
+*** Update File: pimem/src/pimem/retrieval/evidence_units.py
+@@
+-        if turn.role == "assistant":
++        historical_statement = bool(
++            user_answer_requested
++            and turn.role == "user"
++            and not _looks_like_question(turn.content)
++            and (
++                re.search(
++                    r"\b(?:i|we)\s+(?:mentioned|said|used|recommended|suggested|gave|bought|visited|wore|chose)\b",
++                    lowered,
++                )
++                or re.search(r"\b(?:for|an?)\s+example\b|\bsuch as\b", lowered)
++            )
++        )
++        if turn.role == "assistant":
+             pair_type = "nearest_preceding_user" if question_turn else "assistant_without_preceding_question"
+         elif _looks_like_question(turn.content):
+             pair_type = "missing_source_pair"
+-        elif user_answer_requested:
++        elif historical_statement:
+             pair_type = "user_historical_statement"
+         else:
+             pair_type = "user_without_preceding_question"
+*** End Patch

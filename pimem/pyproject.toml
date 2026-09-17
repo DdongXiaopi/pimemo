@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pimem"
+version = "0.1.0"
+description = "Deterministic, LLM-free long-term memory middleware for agents (Python API + MCP)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+eval = ["openai>=1.0", "tqdm"]
+
+[project.scripts]
+pimem = "pimem.cli:main"
+pimem-mcp = "pimem.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"

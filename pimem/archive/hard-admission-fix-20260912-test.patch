@@ -1,0 +1,17 @@
+*** Begin Patch
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+         target = {
+             "record_type": "answer_candidate", "answer_shape": "table_cell",
+-            "text": "| Sunday | Admon | 8 am - 4 pm (Day Shift) |",
++            "text": "| Sunday | Admon | 8 am - 4 pm (Day Shift) |",
+             "answer_units": [{"kind": "table_coordinate", "value": "8 am - 4 pm (Day Shift)"}],
+         }
+@@
+         target = {
+             "record_type": "answer_candidate", "record_id": "candidate:target",
+             "session_id": "target", "answer_shape": "table_cell", "score": 100,
++            "text": "| Sunday | Admon | 8 am - 4 pm (Day Shift) |",
+             "answer_units": [{"kind": "table_coordinate", "value": "8 am - 4 pm (Day Shift)"}],
+         }
+*** End Patch

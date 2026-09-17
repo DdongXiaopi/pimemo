@@ -1,0 +1,126 @@
+*** Begin Patch
+*** Update File: pimem/src/pimem/retrieval/query_plan.py
+@@
+     if field in {"", "unknown"}:
+         return bool(entity_present or entity == "self")
+     if field in {"value", "attribute"}:
+         kinds = {str(unit.get("kind") or "") for unit in (item.get("answer_units") or [])}
+         kinds.update(str(facet.get("kind") or "") for facet in (item.get("facets") or []))
++        answer_shape = str(item.get("answer_shape") or "")
++        if answer_shape == "table_cell" and not kinds & {
++            "table_cell", "table_coordinate", "table_row",
++        }:
++            return False
++        if answer_shape == "list_item" and "list_item" not in kinds:
++            return False
+         if kinds & {
+             "attribute_value", "attribute_sentence", "typed_sentence", "quoted_span",
+             "table_cell", "table_coordinate", "table_row",
+*** Update File: pimem/src/pimem/retrieval/compiler.py
+@@
+-        compact_block = [_compact_hard_episodic_candidate(item) for item in block]
+-        bundle_shape = {
+-            "session_id": bundle.get("session_id"),
+-            "episode_id": bundle.get("episode_id"),
+-            "anchor_candidates": bundle.get("anchor_candidates", []),
+-            "question_turn_ids": bundle.get("question_turn_ids", []),
+-            "answer_turn_ids": bundle.get("answer_turn_ids", []),
+-            "required_answer_units": bundle.get("required_answer_units", []),
+-            "source_observations": bundle.get("source_observations", []),
+-        }
+-        rough_cost = max(1, ConservativeTokenEstimator().estimate(json.dumps(
+-            {"candidates": compact_block, "bundle": bundle_shape},
+-            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+-        )))
+-        blocks.append((quality, block, slots, rough_cost))
++        blocks.append((quality, block, slots))
+@@
+-    covered_slots: set[str] = set()
+-    admitted_cost = 0
+-    admission_limit = (
+-        max(512, min(int(token_budget * 0.60), token_budget - 1200))
+-        if token_budget is not None else None
+-    )
+-    for _, block, slots, rough_cost in sorted(blocks, key=lambda value: value[0], reverse=True):
+-        adds_required_slots = bool(slots - covered_slots)
+-        if selected and not adds_required_slots and admission_limit is not None and admitted_cost + rough_cost > admission_limit:
+-            continue
++    covered_slots: set[str] = set()
++    for _, block, slots in sorted(blocks, key=lambda value: value[0], reverse=True):
++        adds_required_slots = bool(slots - covered_slots)
++        if selected and requested_slots and not adds_required_slots:
++            continue
+         for item in block:
+             record_id = str(item.get("record_id") or "")
+             if record_id in selected_ids:
+                 continue
+             selected.append(item)
+             selected_ids.add(record_id)
+         covered_slots.update(slots)
+-        admitted_cost += rough_cost
+-        if requested_slots and requested_slots <= covered_slots and admission_limit is None:
++        if not requested_slots or requested_slots <= covered_slots:
+             break
+*** Update File: pimem/tests/test_v31_contracts.py
+@@
+     def test_generic_attribute_slot_does_not_match_arbitrary_sentence(self):
+         plan = build_query_plan("I mentioned a show as an example. What was it?")
+         item = {"text": "An unrelated prompt.", "answer_units": [{"kind": "sentence", "text": "An unrelated prompt."}]}
+         self.assertFalse(slot_matches(plan.requested_slots[0], item))
++
++    def test_table_shape_requires_table_evidence_for_slot_match(self):
++        plan = build_query_plan(
++            "What was the rotation for Admon on a Sunday in the shift rotation sheet?"
++        )
++        distractor = {
++            "record_type": "answer_candidate", "answer_shape": "table_cell",
++            "requested_entity_hits": 1, "text": "GM",
++            "answer_units": [{"kind": "quoted_span", "value": "GM"}],
++        }
++        target = {
++            "record_type": "answer_candidate", "answer_shape": "table_cell",
++            "text": "| Sunday | Admon | 8 am - 4 pm (Day Shift) |",
++            "answer_units": [{"kind": "table_coordinate", "value": "8 am - 4 pm (Day Shift)"}],
++        }
++        self.assertFalse(slot_matches(plan.requested_slots[0], distractor))
++        self.assertTrue(slot_matches(plan.requested_slots[0], target))
+@@
+     def test_hard_admission_keeps_bundle_answer_closure_together(self):
+@@
+         self.assertEqual(
+             {item["record_id"] for item in selected},
+             {"candidate:first", "candidate:second"},
+         )
++
++    def test_hard_admission_does_not_trade_answer_closure_for_shorter_distractor(self):
++        plan = build_query_plan(
++            "What was the rotation for Admon on a Sunday in the shift rotation sheet?"
++        )
++        target = {
++            "record_type": "answer_candidate", "record_id": "candidate:target",
++            "session_id": "target", "answer_shape": "table_cell", "score": 100,
++            "answer_units": [{"kind": "table_coordinate", "value": "8 am - 4 pm (Day Shift)"}],
++        }
++        distractor = {
++            "record_type": "answer_candidate", "record_id": "candidate:distractor",
++            "session_id": "distractor", "answer_shape": "table_cell", "score": 900,
++            "requested_entity_hits": 1,
++            "answer_units": [{"kind": "quoted_span", "value": "GM"}],
++        }
++        bundles = [
++            {
++                "episode_id": "episode:target", "session_id": "target",
++                "primary_answer_candidate_ids": ["candidate:target"],
++                "coverage": {"primary_answer": True},
++            },
++            {
++                "episode_id": "episode:distractor", "session_id": "distractor",
++                "primary_answer_candidate_ids": ["candidate:distractor"],
++                "coverage": {"primary_answer": True},
++            },
++        ]
++        selected = _select_hard_answer_closure(
++            [distractor, target], plan, bundles, token_budget=4096
++        )
++        self.assertEqual([item["record_id"] for item in selected], ["candidate:target"])
+*** End Patch

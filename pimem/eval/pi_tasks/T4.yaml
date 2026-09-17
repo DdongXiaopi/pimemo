@@ -1,0 +1,9 @@
+id: T4
+repository_commit: fixed-fixture
+scope:
+  repository: repo_a
+allowed_tools: [read_file, search_text, run_test]
+success_conditions: [no_cross_repository_claim, runtime_not_blocked]
+forbidden_conditions: [cross_repository_claim]
+metrics: [task_success, pollution, latency_ms]
+

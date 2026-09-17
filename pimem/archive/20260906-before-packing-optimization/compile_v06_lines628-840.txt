@@ -1,0 +1,213 @@
+def compile_context_pack_v06(store: SQLiteStore, query: str, scope: Scope, *, as_of: Optional[str] = None,
+                              token_budget: int = 256, limit: int = 50,
+                              options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if token_budget < 1:
+        raise ValueError("token_budget must be positive")
+    started = time.perf_counter()
+    options = dict(options or {})
+    budget_mode = str(options.get("budget_mode", "hard"))
+    if budget_mode not in {"hard", "unbounded_diagnostic", "unbounded_focused"}:
+        raise ValueError("budget_mode must be hard, unbounded_diagnostic, or unbounded_focused")
+    semantic_mode = str(options.get("semantic_mode", "episode_evidence"))
+    plan = build_query_plan(query, as_of=as_of)
+    estimator = options.get("token_estimator") or ConservativeTokenEstimator()
+    reranker = options.get("reranker")
+    recall_limit = max(limit, 1)
+    if semantic_mode == "episode_evidence" and plan.memory_mode in {"episodic_recall", "hybrid"}:
+        if budget_mode in {"hard", "unbounded_diagnostic", "unbounded_focused"}:
+            recall_limit = max(recall_limit, 10000)
+        else:
+            recall_limit = max(recall_limit, limit * 4, 200)
+    recalled = recall(store, query, scope, limit=recall_limit, as_of=as_of, plan=plan,
+                      reranker=reranker, include_observations=True)
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for item in recalled.get("items", []):
+        identity = _record_identity(item)
+        if identity not in candidates or float(item.get("score", 0)) > float(candidates[identity].get("score", 0)):
+            candidates[identity] = dict(item)
+    claim_ids = [str(item["claim_id"]) for item in candidates.values() if item.get("record_type") == "claim" and item.get("claim_id")]
+    closure_trace = {"seed_count": len(claim_ids), "closure_count": len(claim_ids), "closure_truncated": False}
+    state_claims: List[Claim] = []
+    if claim_ids and hasattr(store, "claim_state_closure"):
+        state_claims, closure_trace = store.claim_state_closure(claim_ids, as_of=as_of, max_claims=max(limit * 8, 64))
+        for claim in state_claims:
+            identity = "claim:" + claim.claim_id
+            candidates.setdefault(identity, _item_from_claim(claim, store))
+    state_claim_by_id = {claim.claim_id: claim for claim in state_claims}
+    relations = []
+    if state_claims and hasattr(store, "list_claim_relations"):
+        families = {claim.assertion_family_key for claim in state_claims if claim.assertion_family_key}
+        for family in families:
+            relations.extend(store.list_claim_relations(family, as_of=as_of))
+    _, state_trace = resolve_claim_state(state_claims, as_of=as_of, relations=relations)
+    resolved_ids: set[str] = set()
+    for group in state_trace.get("groups", []):
+        resolved_ids.update(group.get("selected_claim_ids", []))
+    conflicts = _conflict_groups(list(candidates.values()))
+    conflict_records = [{"claim_ids": sorted(set(ids)), "reason": "conflicting_assertion_values", "required_verification": True}
+                       for ids in sorted({tuple(sorted(values)) for values in conflicts.values()})]
+    episode_seed_order = list(candidates.values())
+    working: List[Dict[str, Any]] = []
+    for item in candidates.values():
+        item.setdefault("reasons", item.get("reason", []))
+        if item.get("record_type") == "claim" and state_claims and item.get("claim_id") not in resolved_ids:
+            item["state_omitted"] = True
+            item["state_omitted_reason"] = "not_current_state_candidate"
+        if "preference" in {plan.primary_intent, *plan.secondary_intents}:
+            item["preference_source"] = _preference_source(item)
+        if item.get("claim_id") in conflicts:
+            item["area"] = "VERIFY"
+            item["reasons"] = list(item.get("reasons", [])) + ["conflict"]
+            item["conflict_with"] = [value for value in conflicts[item["claim_id"]] if value != item["claim_id"]]
+        working.append(item)
+    working = [item for item in working if not item.get("state_omitted")]
+    working = _sort_items(working, plan)
+    preference_items = [item for item in working if item.get("preference_source") == "explicit_user_preference"]
+    ordinary_items = [item for item in working if item not in preference_items]
+    ordered = preference_items + ordinary_items if plan.primary_intent == "preference" else working
+    episodic_candidates: List[Dict[str, Any]] = []
+    episode_bundles: List[Dict[str, Any]] = []
+    episode_candidate_records: List[Dict[str, Any]] = []
+    episode_bundle_records: List[Dict[str, Any]] = []
+    episodic_trace: Dict[str, Any] = {}
+    if semantic_mode == "episode_evidence" and plan.memory_mode in {"episodic_recall", "hybrid"}:
+        episode_retrieval_limit = max(limit, 1)
+        if budget_mode in {"hard", "unbounded_focused"}:
+            episode_retrieval_limit = max(episode_retrieval_limit, 10000)
+        else:
+            episode_retrieval_limit = max(episode_retrieval_limit, 10000)
+        episode_seed_items = episode_seed_order if budget_mode == "hard" else ordered
+        episodic_candidates, episode_bundles, episodic_trace = retrieve_episodic_evidence(
+            store, scope, plan, episode_seed_items, limit=episode_retrieval_limit,
+            focused=budget_mode in {"unbounded_focused", "hard"},
+            prefer_seed_order=budget_mode == "hard")
+        if episodic_candidates:
+            has_state_claim = any(item.get("record_type") == "claim" for item in ordered)
+            if plan.primary_intent == "preference" and has_state_claim:
+                existing = {_record_identity(item) for item in ordered}
+                ordered = ordered + [item for item in episodic_candidates if _record_identity(item) not in existing]
+            else:
+                ordered = episodic_candidates
+        candidate_cap = len(episodic_candidates) if budget_mode in {"unbounded_diagnostic", "unbounded_focused"} else 4
+        bundle_cap = len(episode_bundles) if budget_mode in {"unbounded_diagnostic", "unbounded_focused"} else 4
+        if budget_mode == "hard":
+            episode_candidate_records = list(episodic_candidates)
+            episode_bundle_records = list(episode_bundles)
+            episodic_candidates = []
+            episode_bundles = []
+        else:
+            episodic_candidates = [_compact_episodic_candidate(item) for item in episodic_candidates[:candidate_cap]]
+            episode_bundles = [_compact_episode_bundle(
+                bundle,
+                include_answer_candidates=True,
+                include_turn_text=True,
+            ) for bundle in episode_bundles[:bundle_cap]]
+    selected: List[Dict[str, Any]] = []
+    omitted: List[Dict[str, Any]] = []
+    for item in ordered:
+        item = dict(item)
+        if item.get("record_type") == "observation":
+            item["area"] = "REFERENCE"
+            item["state_eligible"] = False
+        selected.append(item)
+    if budget_mode == "hard" and semantic_mode == "episode_evidence":
+        selected = _select_hard_episode_anchors(selected, 4)
+        selected_record_ids = {str(item.get("record_id") or "") for item in selected}
+        selected_session_ids = {str(item.get("session_id") or "") for item in selected}
+        selected_episode_candidates = [
+            item for item in episode_candidate_records
+            if str(item.get("record_id") or "") in selected_record_ids
+        ]
+        episodic_candidates = [_compact_episodic_candidate(item) for item in selected_episode_candidates]
+        episode_bundles = [_compact_episode_bundle(
+            bundle,
+            include_answer_candidates=False,
+            include_turn_text=False,
+        ) for bundle in episode_bundle_records
+           if str(bundle.get("session_id") or "") in selected_session_ids]
+    base = {"schema_version": "semantic-context-pack.v0.6", "semantic_mode": semantic_mode,
+            "budget_mode": budget_mode,
+            "capabilities": ["query_plan", "observation_fallback", "state_closure", "requested_slots", "hard_budget"],
+            "query": query, "scope": scope.as_dict(), "as_of": as_of, "level": "L1", "mode": "shadow",
+            "memory_mode": "retrieval_shadow", "injected": False, "query_plan": plan.as_dict(),
+            "token_budget": token_budget, "budget_unit": "pimem_internal_estimate", "estimator_type": type(estimator).__name__,
+            "estimator_version": getattr(estimator, "version", "custom"), "retrieval_trace": _compact_trace(recalled.get("retrieval_trace", {}), query),
+            "state_resolution_trace": {**state_trace, "closure": closure_trace}, "retrieval_count": len(selected),
+            "candidate_count": len(candidates), "closure_truncated": bool(closure_trace.get("closure_truncated")),
+            "evidence_trust": "untrusted_historical_data", "episodic_candidates": episodic_candidates,
+            "episode_bundles": episode_bundles,
+            "episodic_trace": episodic_trace if budget_mode == "unbounded_diagnostic" else _compact_episodic_trace(episodic_trace),
+            "content_hash": "0" * 64, "payload_token_estimate": 0, "token_estimate": 0,
+            "budget_overflow": False}
+    if semantic_mode == "episode_evidence":
+        base["capabilities"].extend(["episodes", "turns", "answer_candidates", "evidence_bundles", "source_spans"])
+    base["aggregation_hints"] = _aggregation_hints(plan, ordered) if plan.memory_mode == "semantic_state" else {
+        "operator": (plan.aggregation or {}).get("operator"), "dedupe_key": (plan.aggregation or {}).get("dedupe_key"),
+        "groups": [], "aggregation_incomplete": True, "requires_external_calculation": False}
+    base["budget_compressed"] = False
+    slots = _build_slots(plan, selected, [])
+    for _ in range(len(selected) + 1):
+        pack = _pack_candidate(base, selected, omitted, conflict_records, slots, estimator)
+        if base.get("semantic_mode") == "legacy_claim_text" or budget_mode in {"unbounded_diagnostic", "unbounded_focused"} or pack["token_estimate"] <= token_budget or not selected:
+            break
+        if budget_mode == "hard" and semantic_mode == "episode_evidence" and all(
+                item.get("record_type") == "answer_candidate" for item in selected):
+            break
+        removable = [item for item in selected if item.get("area") != "VERIFY" and item.get("preference_source") != "explicit_user_preference"]
+        removable = _budget_removable(removable)
+        if not removable:
+            removable = [item for item in selected if item.get("record_type") != "answer_candidate"]
+        if not removable:
+            break
+        victim = _choose_budget_victim(removable)
+        selected.remove(victim)
+        omitted.append({"record_id": victim.get("record_id"), "claim_id": victim.get("claim_id"), "observation_id": victim.get("observation_id"),
+                        "record_type": victim.get("record_type", "claim"), "reason": "budget", "token_estimate": _item_cost(victim, "L1")})
+        slots = _build_slots(plan, selected, omitted if budget_mode == "unbounded_diagnostic" else [])
+    pack = _pack_candidate(base, selected, omitted, conflict_records, slots, estimator)
+    pack["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    while base.get("semantic_mode") != "legacy_claim_text" and budget_mode == "hard" and pack["token_estimate"] > token_budget and selected:
+        if semantic_mode == "episode_evidence" and all(item.get("record_type") == "answer_candidate" for item in selected):
+            break
+        removable = [item for item in selected if item.get("area") != "VERIFY" and item.get("preference_source") != "explicit_user_preference"]
+        removable = _budget_removable(removable)
+        if not removable:
+            break
+        victim = _choose_budget_victim(removable)
+        selected.remove(victim)
+        omitted.append({"record_id": victim.get("record_id"), "claim_id": victim.get("claim_id"), "observation_id": victim.get("observation_id"),
+                        "record_type": victim.get("record_type", "claim"), "reason": "budget", "token_estimate": _item_cost(victim, "L1")})
+        slots = _build_slots(plan, selected, omitted if budget_mode == "unbounded_diagnostic" else [])
+        pack = _pack_candidate(base, selected, omitted, conflict_records, slots, estimator)
+        pack["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    if base.get("semantic_mode") != "legacy_claim_text" and budget_mode == "hard" and pack["token_estimate"] > token_budget:
+        pack = _minimal_budget_pack(base, omitted, selected, conflict_records, slots, estimator)
+        pack["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+    pack["budget_policy"] = "evidence_anchor_priority_v1" if budget_mode == "hard" else budget_mode
+    if budget_mode == "hard":
+        # Final metadata (latency/budget_policy/hash placeholders) can push a
+        # minimal pack slightly over tiny budgets. Trim only empty optional
+        # containers here; never remove non-empty answer anchors or provenance.
+        for key in ("omitted", "omitted_summary", "unknowns", "conflicts", "memory_view", "evidence_view",
+                    "episode_bundles", "evidence_bundles", "selected", "items", "episodic_candidates",
+                    "required_verification", "aggregation_hints"):
+            final_serialized = json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if estimator.estimate(final_serialized) <= token_budget:
+                break
+            if key in pack and not pack.get(key):
+                pack.pop(key, None)
+    final_serialized = json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    pack["payload_token_estimate"] = estimator.estimate(final_serialized)
+    pack["token_estimate"] = pack["payload_token_estimate"]
+    pack["budget_overflow"] = False if budget_mode in {"unbounded_diagnostic", "unbounded_focused"} else pack["token_estimate"] > token_budget
+    pack["content_hash"] = hashlib.sha256(final_serialized.encode("utf-8")).hexdigest()
+    store.record_operation("context_prepare", None, f"context:{pack['content_hash']}", None,
+                           {"query": query, "scope": scope.as_dict(), "intent": plan.primary_intent,
+                            "candidate_count": len(candidates), "selected_count": len(selected), "omitted_count": len(omitted),
+                            "token_budget": token_budget, "token_estimate": pack["token_estimate"],
+                            "budget_overflow": pack["budget_overflow"], "closure_count": closure_trace.get("closure_count", 0)})
+    return pack
+
+
+def compile_context_pack(store: SQLiteStore, query: str, scope: Scope, *, token_budget: int = 256,
+                         level: str = "L0", limit: int = 50) -> Dict[str, Any]:

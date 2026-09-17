@@ -1,0 +1,9 @@
+id: T1
+repository_commit: fixed-fixture
+scope:
+  repository: repo_a
+allowed_tools: [read_file, search_text, run_test]
+success_conditions: [retrieved_claim:project_test_command, runtime_not_blocked]
+forbidden_conditions: [secret_in_canonical_store, wrong_tool_command_due_to_memory]
+metrics: [task_success, correct_file_change, tool_error_count, token_cost, latency_ms]
+

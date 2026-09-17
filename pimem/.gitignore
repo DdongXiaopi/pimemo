@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+*.local
+
+# Datasets & large artifacts (do NOT commit the 2.7GB LongMemEval data)
+data/
+*.sqlite3
+*.db
+
+# Logs & run outputs
+*.log
+runs/
+_online_*/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime state (not source; contains local sqlite3 / smoke runs)
+.pimem/

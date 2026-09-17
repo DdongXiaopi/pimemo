@@ -1,0 +1,155 @@
+def _minimal_budget_pack(pack_base: Dict[str, Any], omitted: List[Dict[str, Any]],
+                         selected: List[Dict[str, Any]], conflicts: List[Dict[str, Any]],
+                         slots: List[Dict[str, Any]],
+                         estimator: ConservativeTokenEstimator) -> Dict[str, Any]:
+    """Build a bounded fallback without dropping the only answer evidence."""
+    compact_plan = {key: (pack_base.get("query_plan") or {}).get(key)
+                    for key in ("primary_intent", "answer_shape", "requested_slots", "fields", "entity_candidates",
+                                "relation_terms", "literals", "subject_ref", "speech_act_target", "memory_mode")
+                    if key in (pack_base.get("query_plan") or {})}
+    candidates = [item for item in selected if item.get("record_type") == "answer_candidate"]
+    if not candidates:
+        candidates = list(selected)
+
+    def compact_anchor(item: Dict[str, Any]) -> Dict[str, Any]:
+        if item.get("record_type") == "answer_candidate":
+            source_spans = list(item.get("source_span") or [])
+            priority_kinds = {"table_coordinate", "table_cell", "list_item", "attribute_sentence",
+                              "typed_sentence", "quoted_span", "answer_span"}
+            prioritized = [span for span in source_spans if span.get("kind") in priority_kinds]
+            remainder = [span for span in source_spans if span not in prioritized]
+            return {
+                "record_type": "answer_candidate", "record_id": item.get("record_id"),
+                "candidate_id": item.get("candidate_id"), "observation_id": item.get("observation_id"),
+                "source_ids": list(item.get("source_ids") or []), "episode_id": item.get("episode_id"),
+                "session_id": item.get("session_id"), "turn_id": item.get("turn_id"),
+                "turn_index": item.get("turn_index"), "role": item.get("role"),
+                "speech_act": item.get("speech_act"), "answer_shape": item.get("answer_shape"),
+                "score": item.get("score"),
+                "text": str(item.get("text") or item.get("statement") or "")[:700],
+                "answer_span": item.get("answer_span"),
+                "source_span": (prioritized + remainder)[:6],
+                "provenance": {"episode_id": item.get("episode_id"), "turn_id": item.get("turn_id"),
+                               "observation_id": item.get("observation_id")},
+            }
+        return _compact_hard_selected_item(item)
+
+    # Keep at least one answer anchor. For multi-value/list answers, retain the
+    # smallest prefix that covers distinct requested slots, capped for safety.
+    anchors: List[Dict[str, Any]] = []
+    seen_sessions = set()
+    for item in candidates:
+        compact = compact_anchor(item)
+        anchors.append(compact)
+        seen_sessions.add(item.get("session_id"))
+        if len(anchors) >= 2:
+            break
+    if not anchors and selected:
+        anchors.append(compact_anchor(selected[0]))
+
+    source_ids = [source_id for item in anchors for source_id in (item.get("source_ids") or [])]
+    episode_ids = list(dict.fromkeys(item.get("episode_id") for item in anchors if item.get("episode_id")))
+    session_ids = list(dict.fromkeys(item.get("session_id") for item in anchors if item.get("session_id")))
+    compact_bundles = []
+    for bundle in pack_base.get("episode_bundles") or []:
+        if bundle.get("session_id") not in session_ids and bundle.get("episode_id") not in episode_ids:
+            continue
+        compact_bundles.append({
+            "bundle_id": bundle.get("bundle_id"), "episode_id": bundle.get("episode_id"),
+            "session_id": bundle.get("session_id"),
+            "anchor_candidates": [item.get("record_id") for item in anchors],
+            "question_turn_ids": list(bundle.get("question_turn_ids") or [])[:1],
+            "answer_turn_ids": list(bundle.get("answer_turn_ids") or [])[:2],
+            "source_observations": source_ids[:4],
+            "coverage": bundle.get("coverage", {}),
+            "answer_candidates": [item.get("record_id") for item in anchors[:2]],
+        })
+        if len(compact_bundles) >= 2:
+            break
+
+    pack = {
+        "schema_version": pack_base.get("schema_version", "semantic-context-pack.v0.6"),
+        "semantic_mode": pack_base.get("semantic_mode", "episode_evidence"),
+        "budget_mode": "hard", "query": pack_base.get("query"), "scope": pack_base.get("scope", {}),
+        "query_plan": compact_plan, "token_budget": int(pack_base.get("token_budget", 0)),
+        "budget_unit": pack_base.get("budget_unit", "pimem_internal_estimate"),
+        "memory_view": [{"record_id": item.get("record_id"), "statement": item.get("text", "")[:180],
+                         "area": item.get("area"), "state_eligible": False} for item in anchors],
+        "evidence_view": [{"record_id": item.get("record_id"), "record_type": item.get("record_type"),
+                           "observation_ids": item.get("source_ids", []), "session_id": item.get("session_id"),
+                           "turn_index": item.get("turn_index")} for item in anchors],
+        "selected": anchors, "episodic_candidates": anchors,
+        "episode_bundles": compact_bundles, "evidence_bundles": compact_bundles,
+        "omitted": [_compact_omitted_item(item) for item in omitted],
+        "omitted_summary": {**compact_summary(omitted), "decision_completeness": 1.0},
+        "unknowns": slots[:8],
+        "conflicts": [{"claim_ids": item.get("claim_ids", [])} for item in conflicts],
+        "required_verification": [], "aggregation_hints": {}, "budget_compressed": True,
+        "content_hash": "0" * 64, "payload_token_estimate": 0, "token_estimate": 0,
+        "budget_overflow": False, "retrieval_count": len(anchors), "candidate_count": len(selected),
+        "selected_count": len(anchors), "omitted_count": len(omitted), "conflict_count": len(conflicts),
+    }
+    # Remove optional fields deterministically until the minimal pack fits; never
+    # remove the anchor text/source provenance itself.
+    optional_keys = ("omitted", "omitted_summary", "unknowns", "conflicts", "items")
+    for _ in range(len(optional_keys) + 1):
+        serialized = json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        estimate = estimator.estimate(serialized)
+        pack["token_estimate"] = estimate
+        pack["payload_token_estimate"] = estimate
+        if estimate <= int(pack["token_budget"]):
+            break
+        if not optional_keys:
+            break
+        pack.pop(optional_keys[0], None)
+        optional_keys = optional_keys[1:]
+    serialized = json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    pack["content_hash"] = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    pack["token_estimate"] = estimator.estimate(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    pack["payload_token_estimate"] = pack["token_estimate"]
+    for key in ("memory_view", "evidence_view", "episode_bundles", "evidence_bundles", "selected", "items",
+                "episodic_candidates", "required_verification", "aggregation_hints"):
+        if pack["token_estimate"] <= int(pack["token_budget"]):
+            break
+        if key in pack and not pack.get(key):
+            pack.pop(key, None)
+            pack["token_estimate"] = estimator.estimate(json.dumps(pack, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            pack["payload_token_estimate"] = pack["token_estimate"]
+    pack["budget_overflow"] = pack["token_estimate"] > int(pack["token_budget"])
+    return pack
+
+
+def compile_context_pack_v06(store: SQLiteStore, query: str, scope: Scope, *, as_of: Optional[str] = None,
+                              token_budget: int = 256, limit: int = 50,
+                              options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if token_budget < 1:
+        raise ValueError("token_budget must be positive")
+    started = time.perf_counter()
+    options = dict(options or {})
+    budget_mode = str(options.get("budget_mode", "hard"))
+    if budget_mode not in {"hard", "unbounded_diagnostic", "unbounded_focused"}:
+        raise ValueError("budget_mode must be hard, unbounded_diagnostic, or unbounded_focused")
+    semantic_mode = str(options.get("semantic_mode", "episode_evidence"))
+    plan = build_query_plan(query, as_of=as_of)
+    estimator = options.get("token_estimator") or ConservativeTokenEstimator()
+    reranker = options.get("reranker")
+    recall_limit = max(limit, 1)
+    if semantic_mode == "episode_evidence" and plan.memory_mode in {"episodic_recall", "hybrid"}:
+        if budget_mode in {"hard", "unbounded_diagnostic", "unbounded_focused"}:
+            recall_limit = max(recall_limit, 10000)
+        else:
+            recall_limit = max(recall_limit, limit * 4, 200)
+    recalled = recall(store, query, scope, limit=recall_limit, as_of=as_of, plan=plan,
+                      reranker=reranker, include_observations=True)
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for item in recalled.get("items", []):
+        identity = _record_identity(item)
+        if identity not in candidates or float(item.get("score", 0)) > float(candidates[identity].get("score", 0)):
+            candidates[identity] = dict(item)
+    claim_ids = [str(item["claim_id"]) for item in candidates.values() if item.get("record_type") == "claim" and item.get("claim_id")]
+    closure_trace = {"seed_count": len(claim_ids), "closure_count": len(claim_ids), "closure_truncated": False}
+    state_claims: List[Claim] = []
+    if claim_ids and hasattr(store, "claim_state_closure"):
+        state_claims, closure_trace = store.claim_state_closure(claim_ids, as_of=as_of, max_claims=max(limit * 8, 64))
+        for claim in state_claims:
+            identity = "claim:" + claim.claim_id

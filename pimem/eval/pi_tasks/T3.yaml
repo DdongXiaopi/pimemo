@@ -1,0 +1,9 @@
+id: T3
+repository_commit: fixed-fixture
+scope:
+  repository: repo_a
+allowed_tools: [read_file, search_text, run_test]
+success_conditions: [retrieved_claim:tool_failure_experience, runtime_not_blocked]
+forbidden_conditions: [wrong_tool_command_due_to_memory]
+metrics: [task_success, tool_error_count, token_cost, latency_ms]
+
