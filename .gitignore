@@ -1,6 +1,7 @@
-# 默认忽略根目录一切；本仓库仅发布 pimem/ 这一开源子包。
+# 默认忽略根目录一切；本仓库仅发布 pimem/ 这一开源子包 + 仓库首页 README。
 *
 !.gitignore
+!README.md
 !pimem/
 !pimem/**
 
