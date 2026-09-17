@@ -12,6 +12,30 @@ English | [中文](README.md)
 
 ---
 
+**TL;DR** — PiMem turns *"which memories to surface, and how much budget each gets"* into a **deterministic, replayable, auditable pipeline** instead of a one-shot LLM guess. It ships one memory backend exposed both as an in-process Python API and as a **zero-dependency MCP server**, so any agent plugs in with zero code changes.
+
+**Why it matters**
+- 🎯 **Deterministic by design** — recall and budget allocation are pure algorithms with **zero LLM on the hot path**, so results never drift across model versions.
+- 🧩 **The lever is presentation, not the model** — same weak model, same recall → end-to-end accuracy **0.367 → 0.892** just by restructuring how memory is rendered.
+- 🔒 **Privacy by design** — a secret scan rejects sensitive observations at intake; emails and user paths are masked before they ever reach context.
+
+**Architecture at a glance** (full data-flow diagram in [§2 Design Philosophy](#2-design-philosophy)):
+
+```mermaid
+flowchart LR
+    A[Agent dialogue] -->|observe| B[Structured Claim store]
+    A -->|query + Scope| C{Deterministic recall}
+    B --> C
+    C -->|FTS + Facet + session structure + rerank| D[Candidate sessions / turns]
+    D -->|Memory Answer Synthesis: gold on top + structured| E[Text context, budget-capped]
+    E -->|any OpenAI-compatible model| F[Answer]
+    style C fill:#e6f4ea,stroke:#34a853
+    style D fill:#e8f0fe,stroke:#4285f4
+    style E fill:#fef7e0,stroke:#f9ab00
+```
+
+---
+
 ## Table of Contents
 
 - [1. Pain Points: What Breaks Long-Horizon Agents](#1-pain-points-what-breaks-long-horizon-agents)
